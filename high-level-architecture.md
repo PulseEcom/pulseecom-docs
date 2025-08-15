@@ -17,8 +17,8 @@ The architecture is designed to:
 ```mermaid
 flowchart LR
   subgraph Client["Client Systems"]
-    EP[Event Producers\n(orders, clicks, returns)]
-    WH[Webhook Receiver\n(client endpoint)]
+    EP[Event Producers<br/>(orders, clicks, returns)]
+    WH[Webhook Receiver<br/>(client endpoint)]
   end
 
   EP -->|REST/Batch/Stream| GW[API Gateway]
@@ -28,7 +28,7 @@ flowchart LR
   EN -->|events.enriched| K2[(Kafka)]
   K2 --> SC[Scoring Service]
 
-  SC -->|features| MS[Model Serving\n(global, weekly retrained)]
+  SC -->|features| MS[Model Serving<br/>(global, weekly retrained)]
   MS -->|score(s)| SC
 
   SC --> DB[(Postgres)]
@@ -40,7 +40,6 @@ flowchart LR
   DB --> AI[AI Insights Service]
   AI --> QS
 ```
-
 **Flow Summary**
 1. Client systems send events via API Gateway.  
 2. Ingestion service pushes raw events into Kafka.  
@@ -56,20 +55,19 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  H[Historical Scored Events\n(last N weeks)] --> FE[Feature Build & Filtering\n(exclude confirmed anomalies)]
-  FE --> T[Retraining Job\n(weekly schedule)]
+  H[Historical Scored Events<br/>(last N weeks)] --> FE[Feature Build & Filtering<br/>(exclude confirmed anomalies)]
+  FE --> T[Retraining Job<br/>(weekly schedule)]
   T -->|calibration params| CAL[Calibration (thresholds, scaling)]
-  T -->|global model artifact| GM[Model Artifact\n(e.g., IsolationForest)]
+  T -->|global model artifact| GM[Model Artifact<br/>(e.g., IsolationForest)]
   CAL --> MS[Model Serving]
   GM --> MS
   subgraph Serving["Model Serving"]
     MS
-    note right of MS: Hosts global_model@vN\n(cold start uses v0)
+    note right of MS: Hosts global_model@vN<br/>(cold start uses v0)
   end
   MS --> SC[Scoring Service]
   SC --> H
 ```
-
 **Notes**
 - **Cold Start**: The platform serves `global_model@v0` (pre-trained on synthetic + generic e-commerce data) on day 1.  
 - **Weekly Retraining**:
@@ -83,8 +81,8 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  E[Enriched Event] --> B1[Global/Base Model\nscore_base]
-  E --> R1[Rules/Stats\n(e.g., z-score, guards)\nscore_rules]
+  E[Enriched Event] --> B1[Global/Base Model<br/>score_base]
+  E --> R1[Rules/Stats<br/>(e.g., z-score, guards)<br/>score_rules]
 
   B1 --> N1[Normalize]
   R1 --> N2[Normalize]
@@ -92,13 +90,12 @@ flowchart LR
   subgraph CAL["Calibration Layer (global)"]
     N1 --> W[Weighted Combiner]
     N2 --> W
-    W --> TH[Compare to Threshold\n(derived weekly)]
+    W --> TH[Compare to Threshold<br/>(derived weekly)]
   end
 
   TH -->|>= threshold| A[Anomaly = TRUE]
   TH -->|< threshold| N[Anomaly = FALSE]
 ```
-
 **Calibration Layer Responsibilities**
 - Normalize model and rules outputs to a 0–1 range.  
 - Combine signals with stable weights to favor high precision early on.  
@@ -122,4 +119,4 @@ flowchart LR
 - Implement MVP with **global model + calibration layer** and a basic webhook receiver for testing.  
 - Schedule the first **weekly retraining run** on synthetic + pilot data.  
 
-*Note: When a second client is needed, introduce a `tenant_id` field across storage and streams, enable RLS, and promote this design to multi-tenant with minimal refactor.*
+*Tip for GitHub Mermaid:* use `<br/>` for line breaks inside node labels.
