@@ -1,88 +1,125 @@
-# PulseEcom – High-Level Architecture
+# PulseEcom – High Level Architecture
 
 ## Overview
-The PulseEcom platform is designed as a **real-time, multi-tenant analytics pipeline** for e-commerce businesses.  
-It collects event data from client systems, processes and enriches it, applies AI/ML-based anomaly detection, and delivers actionable insights through APIs, AI summaries, and alerts.
+PulseEcom is a real-time e-commerce anomaly detection and insights platform.  
+It ingests transactional and behavioral data from online retail systems, detects unusual patterns using machine learning and rules, and notifies stakeholders instantly.
+
+The architecture is designed to:
+- Operate in **real time** (low-latency stream + batch support).
+- Use a **global model + calibration** that is **retrained weekly**.
+- Be **extensible** for new signals, models, and destinations.
+- Scale horizontally for high event throughput.
 
 ---
 
-## Architectural Goals
-- **Real-Time Processing** – Minimal latency between event ingestion and insights.
-- **Multi-Tenancy** – Secure data isolation for multiple clients.
-- **Scalability** – Handle high event volumes from large e-commerce platforms.
-- **Extensibility** – Add new data sources, detection models, and reporting features with minimal changes.
-- **Integration-Friendly** – Support APIs, streaming, and batch ingestion.
-
----
-
-## Key Components
-
-### 1. API Gateway
-- Single entry point for all API requests.
-- Handles authentication (API keys), rate limiting, and request validation.
-- Routes requests to appropriate services.
-
-### 2. Ingestion Service
-- Accepts event data from clients via REST API or batch upload.
-- Validates and standardizes incoming data.
-- Publishes raw events to **Kafka** (or Redpanda) for processing.
-
-### 3. Enrichment Service
-- Consumes raw events from Kafka.
-- Applies **tenant-specific mapping rules** and adds derived fields (e.g., geolocation, device type).
-- Publishes enriched events to the next Kafka topic.
-
-### 4. Risk Scoring Service
-- Calls the **ML Service** to detect anomalies or suspicious patterns.
-- Annotates events with risk scores and anomaly flags.
-- Persists scored events in **Postgres** for querying and reporting.
-
-### 5. ML Service
-- AI/ML models (e.g., IsolationForest) trained on historical client data.
-- Detects deviations from normal behavior.
-- Future models will include fraud detection, trend prediction, and campaign optimization.
-
-### 6. AI Insights Service
-- Fetches recent scored events and aggregates.
-- Generates **plain-language summaries** highlighting key anomalies and trends.
-- Uses tenant-specific prompt templates for clarity and relevance.
-
-### 7. Query & Reporting Service
-- Provides APIs to retrieve metrics, aggregates, and event history.
-- Supports filtering by time range, campaign, store, and product.
-
-### 8. Alerting Service
-- Sends real-time notifications via webhooks, email, or messaging tools.
-- Retries failed deliveries with exponential backoff.
-- Supports replay of past alerts for compliance and analysis.
-
-### 9. Postgres Database
-- Stores all scored events, tenant configurations, usage data, and alert history.
-- Implements **Row-Level Security (RLS)** for tenant isolation.
-
-### 10. Monitoring & Observability
-- Logs all service interactions with `tenant_id` and `trace_id`.
-- Tracks key metrics like ingest rate, Kafka lag, anomaly detection accuracy, and webhook success rates.
-
----
-
-## Data Flow Diagram
+## 1. System Architecture (End-to-End)
 
 ```mermaid
 flowchart LR
-    Client[Client Systems] -->|Events/API Calls| Gateway[API Gateway]
-    Gateway --> Ingest[Ingestion Service]
-    Ingest -->|Raw Events| Kafka[Kafka / Redpanda]
-    Kafka --> Enrich[Enrichment Service]
-    Enrich -->|Enriched Events| Kafka2[Kafka]
-    Kafka2 --> Scorer[Risk Scoring Service]
-    Scorer -->|Call ML Model| ML[ML Service]
-    ML --> Scorer
-    Scorer -->|Scored Events| DB[(Postgres)]
-    Scorer -->|Scored Events| Kafka3[Kafka]
-    Kafka3 --> Alerts[Alerting Service]
-    DB --> Query[Query & Reporting Service]
-    DB --> AIInsights[AI Insights Service]
-    AIInsights --> Query
-    Alerts --> ClientNotify[Client Alerts/Webhooks]
-    Query --> ClientDash[Client Dashboards/Integrations]
+  subgraph Client["Client Systems"]
+    EP[Event Producers\n(orders, clicks, returns)]
+    WH[Webhook Receiver\n(client endpoint)]
+  end
+
+  EP -->|REST/Batch/Stream| GW[API Gateway]
+  GW --> IN[Ingestion Service]
+  IN -->|events.raw| K1[(Kafka/Redpanda)]
+  K1 --> EN[Enrichment Service]
+  EN -->|events.enriched| K2[(Kafka)]
+  K2 --> SC[Scoring Service]
+
+  SC -->|features| MS[Model Serving\n(global, weekly retrained)]
+  MS -->|score(s)| SC
+
+  SC --> DB[(Postgres)]
+  SC -->|events.scored| K3[(Kafka)]
+  K3 --> AL[Alerting/Webhooks]
+  AL -->|signed POST| WH
+
+  DB --> QS[Query & Metrics API]
+  DB --> AI[AI Insights Service]
+  AI --> QS
+```
+
+**Flow Summary**
+1. Client systems send events via API Gateway.  
+2. Ingestion service pushes raw events into Kafka.  
+3. Enrichment service adds contextual metadata (product/category, geo-IP, device).  
+4. Scoring service calls **Model Serving** for anomaly scores.  
+5. Scored events are persisted in Postgres.  
+6. Alerts are published to the client’s webhook endpoint.  
+7. Query API and AI Insights provide historical and trend data.
+
+---
+
+## 2. Model Lifecycle with Weekly Retraining
+
+```mermaid
+flowchart LR
+  H[Historical Scored Events\n(last N weeks)] --> FE[Feature Build & Filtering\n(exclude confirmed anomalies)]
+  FE --> T[Retraining Job\n(weekly schedule)]
+  T -->|calibration params| CAL[Calibration (thresholds, scaling)]
+  T -->|global model artifact| GM[Model Artifact\n(e.g., IsolationForest)]
+  CAL --> MS[Model Serving]
+  GM --> MS
+  subgraph Serving["Model Serving"]
+    MS
+    note right of MS: Hosts global_model@vN\n(cold start uses v0)
+  end
+  MS --> SC[Scoring Service]
+  SC --> H
+```
+
+**Notes**
+- **Cold Start**: The platform serves `global_model@v0` (pre-trained on synthetic + generic e-commerce data) on day 1.  
+- **Weekly Retraining**:
+  - Produces updated **calibration parameters** (thresholds, scaling).
+  - Produces a new **global model artifact** if improvements are found.  
+- **Model Serving** supports hot-swapping models without downtime and logs model version with each score.
+
+---
+
+## 3. Scoring + Calibration Decision Flow
+
+```mermaid
+flowchart LR
+  E[Enriched Event] --> B1[Global/Base Model\nscore_base]
+  E --> R1[Rules/Stats\n(e.g., z-score, guards)\nscore_rules]
+
+  B1 --> N1[Normalize]
+  R1 --> N2[Normalize]
+
+  subgraph CAL["Calibration Layer (global)"]
+    N1 --> W[Weighted Combiner]
+    N2 --> W
+    W --> TH[Compare to Threshold\n(derived weekly)]
+  end
+
+  TH -->|>= threshold| A[Anomaly = TRUE]
+  TH -->|< threshold| N[Anomaly = FALSE]
+```
+
+**Calibration Layer Responsibilities**
+- Normalize model and rules outputs to a 0–1 range.  
+- Combine signals with stable weights to favor high precision early on.  
+- Apply a **weekly-updated threshold** derived from recent normal behavior.  
+- Emit final anomaly decision and confidence.
+
+---
+
+## Key Characteristics
+- **Single-Client Simplicity**: No tenant routing or RLS; one deployment, one client.  
+- **Hybrid Detection**: ML + rules for precision and adaptability.  
+- **Retraining Flexibility**: Weekly schedule now; can add drift-triggered retraining later.  
+- **Low Latency Goal**: Ingestion-to-alert under **2 seconds** (P95) on MVP hardware.  
+- **Extensible**: Easy to add sources (batch, stream), models, and destinations (S3, CRM, BI).
+
+---
+
+## Next Steps
+- Define **business KPIs** (alert precision, recall, latency SLA).  
+- Set up CI/CD (build, test, deploy to staging).  
+- Implement MVP with **global model + calibration layer** and a basic webhook receiver for testing.  
+- Schedule the first **weekly retraining run** on synthetic + pilot data.  
+
+*Note: When a second client is needed, introduce a `tenant_id` field across storage and streams, enable RLS, and promote this design to multi-tenant with minimal refactor.*
