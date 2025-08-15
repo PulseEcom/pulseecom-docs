@@ -1,122 +1,85 @@
-# PulseEcom – High Level Architecture
+# PulseEcom – High-Level Architecture
 
 ## Overview
-PulseEcom is a real-time e-commerce anomaly detection and insights platform.  
-It ingests transactional and behavioral data from online retail systems, detects unusual patterns using machine learning and rules, and notifies stakeholders instantly.
-
-The architecture is designed to:
-- Operate in **real time** (low-latency stream + batch support).
-- Use a **global model + calibration** that is **retrained weekly**.
-- Be **extensible** for new signals, models, and destinations.
-- Scale horizontally for high event throughput.
+The PulseEcom platform is a real time analytics pipeline for e commerce businesses.  
+It collects event data from client systems, enriches it, detects anomalies, and delivers actionable insights via APIs, summaries, and alerts.
 
 ---
 
-## 1. System Architecture (End-to-End)
+## Architectural Goals
+- **Real time processing** with minimal latency from ingest to insight  
+- **Single tenant MVP** now, expandable later  
+- **Scalable and extensible** services and data flow  
+- **Integration friendly** APIs, streaming, and batch support  
+
+---
+
+## Key Components
+- **API Gateway** – Authentication, rate limiting, routing  
+- **Ingestion Service** – Validates input and writes raw events to Kafka  
+- **Enrichment Service** – Adds context like device, geo, category and republishes  
+- **Scoring Layers** – Pre Trained Models, Client Model, Calibration Layer  
+- **Query and Insights** – Metrics and summaries over scored data  
+- **Alerting Service** – Webhook notifications with retries  
+- **Postgres** – Storage for scored events and aggregates  
+- **Learning and Model Update** – Retraining, drift checks, calibration updates  
+
+---
+
+## Data Flow Diagram
 
 ```mermaid
-flowchart LR
-  subgraph Client["Client Systems"]
-    EP[Event Producers<br/>(orders, clicks, returns)]
-    WH[Webhook Receiver<br/>(client endpoint)]
-  end
+flowchart TD
+    %% Layers
+    subgraph Ingestion_Layer[Ingestion Layer]
+        GW[API Gateway]
+        IG[Ingestion Service]
+    end
 
-  EP -->|REST/Batch/Stream| GW[API Gateway]
-  GW --> IN[Ingestion Service]
-  IN -->|events.raw| K1[(Kafka/Redpanda)]
-  K1 --> EN[Enrichment Service]
-  EN -->|events.enriched| K2[(Kafka)]
-  K2 --> SC[Scoring Service]
+    subgraph Enrichment_Layer[Enrichment Layer]
+        EN[Enrichment Service]
+    end
 
-  SC -->|features| MS[Model Serving<br/>(global, weekly retrained)]
-  MS -->|score(s)| SC
+    subgraph Scoring_Layer[Scoring Layer]
+        PTM[Pre-Trained Model]
+        CSM[Client-Specific Model]
+        CAL[Calibration Layer]
+    end
 
-  SC --> DB[(Postgres)]
-  SC -->|events.scored| K3[(Kafka)]
-  K3 --> AL[Alerting/Webhooks]
-  AL -->|signed POST| WH
+    subgraph Learning_Layer[Learning Layer]
+        DRIFT[Drift Detection]
+        RET[Retraining Job]
+        THRES[Threshold Recalibration]
+    end
 
-  DB --> QS[Query & Metrics API]
-  DB --> AI[AI Insights Service]
-  AI --> QS
-```
-**Flow Summary**
-1. Client systems send events via API Gateway.  
-2. Ingestion service pushes raw events into Kafka.  
-3. Enrichment service adds contextual metadata (product/category, geo-IP, device).  
-4. Scoring service calls **Model Serving** for anomaly scores.  
-5. Scored events are persisted in Postgres.  
-6. Alerts are published to the client’s webhook endpoint.  
-7. Query API and AI Insights provide historical and trend data.
+    subgraph Persistence_Layer[Persistence Layer]
+        DB[(Postgres Database)]
+    end
 
----
+    subgraph Delivery_Layer[Delivery Layer]
+        AL[Alerting Service]
+        QAPI[Query API]
+        AIS[AI Insights Service]
+    end
 
-## 2. Model Lifecycle with Weekly Retraining
+    %% Flow
+    GW --> IG --> EN
+    EN --> PTM
+    EN --> CSM
+    PTM --> CAL
+    CSM --> CAL
+    CAL --> DB
+    CAL --> AL
+    DB --> QAPI
+    DB --> AIS
+    AL --> ClientAlerts[Client Notifications]
+    QAPI --> ClientDashboards[Client Dashboards]
+    AIS --> ClientDashboards
 
-```mermaid
-flowchart LR
-  H[Historical Scored Events<br/>(last N weeks)] --> FE[Feature Build & Filtering<br/>(exclude confirmed anomalies)]
-  FE --> T[Retraining Job<br/>(weekly schedule)]
-  T -->|calibration params| CAL[Calibration (thresholds, scaling)]
-  T -->|global model artifact| GM[Model Artifact<br/>(e.g., IsolationForest)]
-  CAL --> MS[Model Serving]
-  GM --> MS
-  subgraph Serving["Model Serving"]
-    MS
-    note right of MS: Hosts global_model@vN<br/>(cold start uses v0)
-  end
-  MS --> SC[Scoring Service]
-  SC --> H
-```
-**Notes**
-- **Cold Start**: The platform serves `global_model@v0` (pre-trained on synthetic + generic e-commerce data) on day 1.  
-- **Weekly Retraining**:
-  - Produces updated **calibration parameters** (thresholds, scaling).
-  - Produces a new **global model artifact** if improvements are found.  
-- **Model Serving** supports hot-swapping models without downtime and logs model version with each score.
+    %% Learning feedback loop
+    DB --> DRIFT --> RET
+    RET --> CSM
+    RET --> CAL
+    THRES --> CAL
 
----
 
-## 3. Scoring + Calibration Decision Flow
-
-```mermaid
-flowchart LR
-  E[Enriched Event] --> B1[Global/Base Model<br/>score_base]
-  E --> R1[Rules/Stats<br/>(e.g., z-score, guards)<br/>score_rules]
-
-  B1 --> N1[Normalize]
-  R1 --> N2[Normalize]
-
-  subgraph CAL["Calibration Layer (global)"]
-    N1 --> W[Weighted Combiner]
-    N2 --> W
-    W --> TH[Compare to Threshold<br/>(derived weekly)]
-  end
-
-  TH -->|>= threshold| A[Anomaly = TRUE]
-  TH -->|< threshold| N[Anomaly = FALSE]
-```
-**Calibration Layer Responsibilities**
-- Normalize model and rules outputs to a 0–1 range.  
-- Combine signals with stable weights to favor high precision early on.  
-- Apply a **weekly-updated threshold** derived from recent normal behavior.  
-- Emit final anomaly decision and confidence.
-
----
-
-## Key Characteristics
-- **Single-Client Simplicity**: No tenant routing or RLS; one deployment, one client.  
-- **Hybrid Detection**: ML + rules for precision and adaptability.  
-- **Retraining Flexibility**: Weekly schedule now; can add drift-triggered retraining later.  
-- **Low Latency Goal**: Ingestion-to-alert under **2 seconds** (P95) on MVP hardware.  
-- **Extensible**: Easy to add sources (batch, stream), models, and destinations (S3, CRM, BI).
-
----
-
-## Next Steps
-- Define **business KPIs** (alert precision, recall, latency SLA).  
-- Set up CI/CD (build, test, deploy to staging).  
-- Implement MVP with **global model + calibration layer** and a basic webhook receiver for testing.  
-- Schedule the first **weekly retraining run** on synthetic + pilot data.  
-
-*Tip for GitHub Mermaid:* use `<br/>` for line breaks inside node labels.
